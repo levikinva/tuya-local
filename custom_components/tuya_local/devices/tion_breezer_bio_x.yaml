@@ -4,77 +4,103 @@ products:
     manufacturer: Tion
     model: Breezer Bio X
 entities:
-  # Main entities
-  - entity: switch
-    name: "Power"
-    icon: "mdi:power"
+  - entity: fan
+    translation_key: ventilation
     dps:
       - id: 101
-        name: switch
         type: boolean
-  - entity: number
-    name: "Speed"
-    icon: "mdi:fan"
-    dps:
+        name: switch
       - id: 102
-        name: value
         type: integer
+        name: speed
         range:
           min: 1
           max: 7
-  - entity: number
-    name: "Heater"
-    icon: "mdi:thermometer-plus"
+      - id: 105
+        type: boolean
+        name: preset_mode
+        mapping:
+          - dps_val: false
+            value: fresh
+          - dps_val: true
+            value: circulate
+  - entity: climate
+    # The heater only warms the incoming air, it does not control room
+    # temperature. The current temperature is the air at the outlet.
+    translation_key: heater
     dps:
+      # The heater has no separate switch: a target of 0 turns it off.
       - id: 114
-        name: value
         type: integer
+        name: hvac_mode
+        mapping:
+          - dps_val: 0
+            value: "off"
+          - dps_val: 10
+            value: heat
+          - value: heat
+      - id: 114
+        type: integer
+        name: temperature
         unit: C
         range:
           min: 0
           max: 30
-  - entity: switch
-    name: "Recirculation mode"
-    icon: "mdi:air-conditioner"
-    dps:
-      - id: 105
-        name: switch
+      - id: 108
+        type: integer
+        name: current_temperature
+      - id: 117
         type: boolean
+        name: hvac_action
+        mapping:
+          - dps_val: true
+            value: heating
+          - value: idle
+      - id: 118
+        type: string
+        name: heater_type
+      - id: 120
+        type: integer
+        name: heater_power
   - entity: sensor
-    name: "Indoor temperature"
     class: temperature
+    translation_key: outlet_temperature
     dps:
       - id: 108
-        name: sensor
         type: integer
-        unit: "°C"
+        name: sensor
+        unit: C
+        class: measurement
   - entity: sensor
-    name: "Outdoor temperature"
     class: temperature
+    translation_key: inlet_temperature
     dps:
       - id: 112
-        name: sensor
         type: integer
-        unit: "°C"
+        name: sensor
+        unit: C
+        class: measurement
   - entity: sensor
     translation_key: filter_life
     dps:
       - id: 115
-        name: sensor
         type: integer
+        name: sensor
         unit: "%"
+        class: measurement
   - entity: sensor
     class: carbon_dioxide
     dps:
       - id: 106
-        name: sensor
         type: integer
-        unit: "ppm"
+        name: sensor
+        unit: ppm
+        class: measurement
       - id: 122
-        name: available
         type: string
+        name: available
         mapping:
-          - dps_val: "absent"
+          - dps_val: absent
             value: false
           - dps_val: null
             value: false
@@ -83,244 +109,223 @@ entities:
     class: pm25
     dps:
       - id: 116
-        name: sensor
         type: integer
-        unit: "µg/m³"
+        name: sensor
+        unit: µg/m³
+        class: measurement
       - id: 123
-        name: available
         type: string
+        name: available
         mapping:
-          - dps_val: "absent"
+          - dps_val: absent
             value: false
           - dps_val: null
             value: false
           - value: true
   - entity: sensor
-    class: "humidity"
+    class: humidity
     dps:
       - id: 119
-        name: sensor
         type: integer
+        name: sensor
         unit: "%"
+        class: measurement
       - id: 124
-        name: available
         type: string
+        name: available
         mapping:
-          - dps_val: "absent"
+          - dps_val: absent
             value: false
           - dps_val: null
             value: false
           - value: true
-
-  # Configuration entities
   - entity: switch
     translation_key: sleep
     category: config
     dps:
       - id: 132
-        name: switch
         type: boolean
+        name: switch
   - entity: lock
     translation_key: child_lock
     category: config
     dps:
       - id: 111
-        name: lock
         type: boolean
-  - entity: light
-    name: "Indicator light"
+        name: lock
+  - entity: select
+    translation_key: display_brightness
     category: config
     dps:
       - id: 104
-        name: brightness
         type: string
+        name: option
         mapping:
           - dps_val: "0"
-            value: 0
+            value: "off"
           - dps_val: "50"
-            value: 128
+            value: dim
           - dps_val: "100"
-            value: 255
+            value: bright
   - entity: switch
     translation_key: sound
     category: config
     dps:
       - id: 103
-        name: switch
         type: boolean
+        name: switch
+  - entity: select
+    name: Panel color
+    icon: "mdi:palette"
+    category: config
+    dps:
+      - id: 133
+        type: string
+        name: option
+        mapping:
+          - dps_val: color0
+            value: Turquoise
+          - dps_val: color1
+            value: Purple
+          - dps_val: color2
+            value: Green
+          - dps_val: color3
+            value: White
+          - dps_val: color4
+            value: Yellow
   - entity: button
     translation_key: filter_reset
     category: config
     dps:
       - id: 110
-        name: button
         type: boolean
-  - entity: switch
-    name: "Auto mode"
+        name: button
+  - entity: number
+    name: Filter replacement interval
+    icon: "mdi:calendar-check"
     category: config
+    dps:
+      - id: 134
+        type: integer
+        name: value
+        unit: d
+        range:
+          min: 30
+          max: 365
+  # Automatic mode uses the built-in CO2 sensor, which only the SM
+  # variants have; dp 122 reports "absent" on the others.
+  - entity: switch
+    name: Automatic mode
     icon: "mdi:fan-auto"
+    category: config
     dps:
       - id: 131
-        name: switch
         type: boolean
+        name: switch
       - id: 122
-        name: available
         type: string
+        name: available
         mapping:
-          - dps_val: "absent"
+          - dps_val: absent
             value: false
           - dps_val: null
             value: false
           - value: true
   - entity: number
-    name: "Target CO2"
-    category: config
+    name: Automatic mode target CO2
     icon: "mdi:molecule-co2"
+    category: config
     dps:
       - id: 130
-        name: value
         type: integer
-        unit: "ppm"
+        name: value
+        unit: ppm
         range:
           min: 400
           max: 1500
         mapping:
-          - step: 50.0
+          - step: 50
       - id: 122
-        name: available
         type: string
+        name: available
         mapping:
-          - dps_val: "absent"
+          - dps_val: absent
             value: false
           - dps_val: null
             value: false
           - value: true
   - entity: number
-    name: "Max auto speed"
-    category: config
+    name: Automatic mode maximum speed
     icon: "mdi:fan-chevron-up"
+    category: config
     dps:
       - id: 128
-        name: value
         type: integer
+        name: value
         range:
           min: 1
           max: 7
       - id: 122
-        name: available
         type: string
+        name: available
         mapping:
-          - dps_val: "absent"
+          - dps_val: absent
             value: false
           - dps_val: null
             value: false
           - value: true
   - entity: number
-    name: "Min auto speed"
-    category: config
+    name: Automatic mode minimum speed
     icon: "mdi:fan-chevron-down"
+    category: config
     dps:
       - id: 129
-        name: value
         type: integer
+        name: value
         range:
           min: 0
           max: 1
       - id: 122
-        name: available
         type: string
+        name: available
         mapping:
-          - dps_val: "absent"
+          - dps_val: absent
             value: false
           - dps_val: null
             value: false
           - value: true
-  - entity: number
-    name: "Target filter life"
-    category: config
-    icon: "mdi:calendar-check"
-    dps:
-      - id: 134
-        name: value
-        type: integer
-        unit: "days"
-        range:
-          min: 30
-          max: 365
-        mapping:
-          - step: 1.0
-  - entity: select
-    name: "Panel color"
-    category: config
-    icon: "mdi:palette"
-    dps:
-      - id: 133
-        name: option
-        type: string
-        mapping:
-          - dps_val: "color0"
-            value: "Turquoise"
-          - dps_val: "color1"
-            value: "Purple"
-          - dps_val: "color2"
-            value: "Green"
-          - dps_val: "color3"
-            value: "White"
-          - dps_val: "color4"
-            value: "Yellow"
   - entity: button
-    name: "Calibrate CO2"
+    name: Calibrate CO2 sensor
+    icon: "mdi:molecule-co2"
     category: config
-    icon: "mdi:camera-metering-matrix"
     dps:
       - id: 136
-        name: button
         type: boolean
-
-  # Diagnostic entities
-  - entity: sensor
-    name: "Heater type"
-    category: diagnostic
-    icon: "mdi:information-outline"
-    hidden: true
-    dps:
-      - id: 118
-        name: sensor
+        name: button
+      - id: 122
         type: string
+        name: available
+        mapping:
+          - dps_val: absent
+            value: false
+          - dps_val: null
+            value: false
+          - value: true
   - entity: sensor
-    name: "Total work time"
-    category: diagnostic
+    name: Total operating time
     class: duration
-    hidden: true
+    category: diagnostic
     dps:
       - id: 113
-        name: sensor
         type: integer
-        unit: "s"
+        name: sensor
+        unit: s
+        class: total_increasing
   - entity: sensor
-    name: "Error code"
-    category: diagnostic
+    name: Error code
     icon: "mdi:alert-circle-outline"
+    category: diagnostic
     dps:
       - id: 127
-        name: sensor
         type: string
-  - entity: binary_sensor
-    name: "Heating"
-    category: diagnostic
-    icon: "mdi:radiator"
-    hidden: true
-    dps:
-      - id: 117
         name: sensor
-        type: boolean
-  - entity: sensor
-    name: "Heater power"
-    category: diagnostic
-    icon: "mdi:gauge"
-    hidden: true
-    dps:
-      - id: 120
-        name: sensor
-        type: integer
-        unit: "%"
