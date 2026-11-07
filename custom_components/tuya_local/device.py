@@ -165,6 +165,27 @@ class TuyaLocalDevice(object):
         # The number of failures from a working protocol before retrying other protocols.
         self._AUTO_FAILURE_RESET_COUNT = 10
 
+        # Some devices (e.g. Tion Bio X breezers) eventually lock up their
+        # MCU communication if a new command arrives before they have
+        # reported the result of the previous one. So after sending a
+        # command over a persistent connection, wait for the device to
+        # report one of the sent dps (or for this timeout) before sending
+        # the next command, heartbeat or poll.
+        self._COMMAND_SETTLE_TIMEOUT = 2
+        self._send_lock = asyncio.Lock()
+        self._awaiting_report = set()
+        self._awaiting_since = 0
+        self._report_received = asyncio.Event()
+        self._report_received.set()
+
+        # A device whose network stack is alive can still stop returning
+        # any data (answering everything with "data format error").
+        # Consider such a device unavailable if it has returned data
+        # before, but none for this long.
+        self._STALE_DATA_TIMEOUT = self._POLLING_INTERVAL * 3
+        self._last_data_at = 0
+        self._stale_logged = False
+
     @property
     def name(self):
         return self._name
@@ -192,9 +213,36 @@ class TuyaLocalDevice(object):
 
     @property
     def has_returned_state(self):
-        """Return True if the device has returned some state."""
+        """Return True if the device has returned some state recently."""
         cached = self._get_cached_state()
-        return len(cached) > 1 or cached.get("updated_at", 0) > 0
+        if not (len(cached) > 1 or cached.get("updated_at", 0) > 0):
+            return False
+        return not self.data_is_stale
+
+    @property
+    def data_is_stale(self):
+        """Return True if the device returned data before, but not lately."""
+        return (
+            self._last_data_at > 0
+            and time() - self._last_data_at > self._STALE_DATA_TIMEOUT
+        )
+
+    def _note_data_received(self):
+        self._last_data_at = time()
+        if self._stale_logged:
+            _LOGGER.info("%s is returning data again", self.name)
+            self._stale_logged = False
+
+    def _check_stale_data(self):
+        if self.data_is_stale and not self._stale_logged:
+            _LOGGER.warning(
+                "%s has returned no data for %ds, marking unavailable",
+                self.name,
+                int(time() - self._last_data_at),
+            )
+            self._stale_logged = True
+            for entity in self._children:
+                entity.async_schedule_update_ha_state()
 
     @callback
     def actually_start(self, event=None):
@@ -272,6 +320,9 @@ class TuyaLocalDevice(object):
                     self._cached_state = self._cached_state | poll
                     self._cached_state["updated_at"] = time()
                     self._remove_properties_from_pending_updates(poll)
+                    if poll:
+                        self._note_data_received()
+                    self._check_awaited_report(poll)
 
                     for entity in self._children:
                         # let entities trigger off poll contents directly
@@ -348,6 +399,9 @@ class TuyaLocalDevice(object):
                 last_cache = self._cached_state.get("updated_at", 0)
                 now = time()
                 full_poll = False
+                self._check_stale_data()
+                # Don't disturb the device while it is processing a command
+                awaiting_report = self._is_awaiting_report()
                 if (persist == self.should_poll) or (
                     persist and (wifi_api.socket is None)
                 ):
@@ -365,8 +419,9 @@ class TuyaLocalDevice(object):
                     self._last_full_poll = 0  # ensure we start with a full poll
 
                 needs_full_poll = now - self._last_full_poll > self._POLLING_INTERVAL
-                if now - last_cache > self._POLLING_INTERVAL or (
-                    persist and needs_full_poll
+                if not awaiting_report and (
+                    now - last_cache > self._POLLING_INTERVAL
+                    or (persist and needs_full_poll)
                 ):
                     if (
                         self._force_dps
@@ -388,7 +443,10 @@ class TuyaLocalDevice(object):
                     self._last_full_poll = now
                     last_heartbeat = now  # reset heartbeat timer on full poll
                 elif persist:
-                    if now - last_heartbeat > self._HEARTBEAT_INTERVAL:
+                    if (
+                        not awaiting_report
+                        and now - last_heartbeat > self._HEARTBEAT_INTERVAL
+                    ):
                         await self._hass.async_add_executor_job(
                             self._api.heartbeat,
                             True,
@@ -567,6 +625,8 @@ class TuyaLocalDevice(object):
             if "Err" not in new_state:
                 self._cached_state = self._cached_state | new_state.get("dps", {})
                 self._cached_state["updated_at"] = time()
+                if new_state.get("dps"):
+                    self._last_data_at = time()
                 for entity in self._children:
                     for dp in entity._config.dps():
                         # Clear non-persistant dps that were not in the poll
@@ -644,18 +704,73 @@ class TuyaLocalDevice(object):
         await self._send_pending_updates()
 
     async def _send_pending_updates(self):
-        pending_properties = self._get_unsent_properties()
+        async with self._send_lock:
+            # Another caller may already have sent everything queued
+            if not self._get_unsent_properties():
+                return
+            await self._wait_for_report()
+            # Commands queued while waiting are merged and sent together,
+            # so another caller may already have sent everything.
+            pending_properties = self._get_unsent_properties()
+            if not pending_properties:
+                return
 
-        _LOGGER.debug(
-            "%s sending dps update: %s",
-            self.name,
-            log_json(pending_properties),
-        )
+            _LOGGER.debug(
+                "%s sending dps update: %s",
+                self.name,
+                log_json(pending_properties),
+            )
 
-        await self._retry_on_failed_connection(
-            lambda: self._set_values(pending_properties),
-            "Failed to update device state.",
-        )
+            await self._retry_on_failed_connection(
+                lambda: self._set_values(pending_properties),
+                "Failed to update device state.",
+            )
+            self._expect_report(pending_properties)
+
+    def _expect_report(self, properties):
+        """After sending, expect the device to report one of the dps."""
+        # Only a persistent connection receives the device's reports
+        if self.should_poll:
+            return
+        pending = self._get_pending_updates()
+        sent = {key for key in properties if pending.get(key, {}).get("sent")}
+        if sent:
+            self._awaiting_report = sent
+            self._awaiting_since = time()
+            self._report_received.clear()
+
+    def _is_awaiting_report(self):
+        """Return True while a sent command is still unreported."""
+        if self._report_received.is_set():
+            return False
+        if time() - self._awaiting_since > self._COMMAND_SETTLE_TIMEOUT:
+            # Give up waiting, so heartbeats and polls are not blocked forever
+            self._awaiting_report = set()
+            self._report_received.set()
+            return False
+        return True
+
+    def _check_awaited_report(self, poll):
+        """Release the next command if the device reported a sent dp."""
+        if self._awaiting_report and self._awaiting_report & poll.keys():
+            self._awaiting_report = set()
+            self._report_received.set()
+
+    async def _wait_for_report(self):
+        if not self._is_awaiting_report():
+            return
+        remaining = self._COMMAND_SETTLE_TIMEOUT - (time() - self._awaiting_since)
+        try:
+            await asyncio.wait_for(self._report_received.wait(), remaining)
+        except TimeoutError:
+            _LOGGER.debug(
+                "%s did not report %s within %ss, sending next command anyway",
+                self.name,
+                sorted(self._awaiting_report),
+                self._COMMAND_SETTLE_TIMEOUT,
+            )
+            self._awaiting_report = set()
+            self._report_received.set()
 
     def _set_values(self, properties):
         self._api.set_multiple_values(properties, nowait=True)

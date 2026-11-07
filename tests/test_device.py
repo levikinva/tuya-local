@@ -756,3 +756,151 @@ async def test_refresh_error_914_stays_quiet_when_rotating_protocols(
         await subject.async_refresh()
 
     assert caplog.text == ""
+
+
+def _make_persistent(subject):
+    """Put the device into persistent-connection mode with some state."""
+    subject._cached_state = {"1": True, "updated_at": time()}
+    subject._poll_only = False
+    subject._temporary_poll = False
+
+
+@pytest.mark.asyncio
+async def test_next_command_waits_for_report_of_previous(subject, mock_api):
+    _make_persistent(subject)
+    subject._COMMAND_SETTLE_TIMEOUT = 5
+
+    await subject.async_set_property("1", False)
+    mock_api().set_multiple_values.assert_called_once_with({"1": False}, nowait=True)
+    assert subject._awaiting_report == {"1"}
+    mock_api().set_multiple_values.reset_mock()
+
+    second = asyncio.ensure_future(subject.async_set_property("1", True))
+    await asyncio.sleep(0.1)
+    # still waiting for the device to report the first command
+    mock_api().set_multiple_values.assert_not_called()
+
+    # the device reports dp 1, releasing the next command
+    subject._check_awaited_report({"1": False})
+    await asyncio.wait_for(second, 1)
+    mock_api().set_multiple_values.assert_called_once_with({"1": True}, nowait=True)
+
+
+@pytest.mark.asyncio
+async def test_unrelated_report_does_not_release_next_command(subject):
+    _make_persistent(subject)
+    subject._awaiting_report = {"1"}
+    subject._report_received.clear()
+
+    subject._check_awaited_report({"2": 5})
+    assert not subject._report_received.is_set()
+
+    subject._check_awaited_report({"1": True, "2": 5})
+    assert subject._report_received.is_set()
+    assert subject._awaiting_report == set()
+
+
+@pytest.mark.asyncio
+async def test_commands_queued_while_waiting_are_merged(subject, mock_api):
+    _make_persistent(subject)
+    subject._COMMAND_SETTLE_TIMEOUT = 5
+    subject._awaiting_report = {"1"}
+    subject._awaiting_since = time()
+    subject._report_received.clear()
+
+    first = asyncio.ensure_future(subject.async_set_properties({"2": 1}))
+    second = asyncio.ensure_future(subject.async_set_properties({"3": 2}))
+    await asyncio.sleep(0.1)
+    mock_api().set_multiple_values.assert_not_called()
+
+    subject._check_awaited_report({"1": False})
+    await asyncio.wait_for(asyncio.gather(first, second), 1)
+    # both queued commands went out together in a single message
+    mock_api().set_multiple_values.assert_called_once_with(
+        {"2": 1, "3": 2}, nowait=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_command_sent_anyway_after_settle_timeout(subject, mock_api):
+    _make_persistent(subject)
+    subject._COMMAND_SETTLE_TIMEOUT = 0.1
+    subject._awaiting_report = {"1"}
+    subject._awaiting_since = time()
+    subject._report_received.clear()
+
+    await asyncio.wait_for(subject.async_set_property("2", 3), 1)
+    mock_api().set_multiple_values.assert_called_once_with({"2": 3}, nowait=True)
+
+
+@pytest.mark.asyncio
+async def test_no_report_expected_when_polling(subject, mock_api):
+    subject._cached_state = {"1": True, "updated_at": time()}
+    subject._poll_only = True
+
+    await subject.async_set_property("1", False)
+    assert subject._report_received.is_set()
+    assert subject._awaiting_report == set()
+
+
+def test_stale_data_makes_device_unavailable(subject):
+    subject._cached_state = {"1": True, "updated_at": time()}
+    subject._last_data_at = time()
+    assert subject.has_returned_state
+    assert not subject.data_is_stale
+
+    subject._last_data_at = time() - subject._STALE_DATA_TIMEOUT - 1
+    assert subject.data_is_stale
+    assert not subject.has_returned_state
+
+    subject._note_data_received()
+    assert not subject.data_is_stale
+    assert subject.has_returned_state
+
+
+def test_never_returning_data_is_not_stale(subject):
+    """Devices such as IR remotes never return dps; don't flag them."""
+    subject._cached_state = {"updated_at": time()}
+    subject._last_data_at = 0
+    assert not subject.data_is_stale
+    assert subject.has_returned_state
+
+
+@pytest.mark.asyncio
+async def test_receive_loop_skips_heartbeat_while_awaiting_report(subject, mock_api):
+    mock_api().receive.return_value = {"1": "UPDATED"}
+    subject._running = True
+    subject._cached_state = {"1": "INIT", "updated_at": time()}
+    subject._last_full_poll = time()
+    subject._poll_only = False
+    subject._temporary_poll = False
+    subject._COMMAND_SETTLE_TIMEOUT = 60
+    subject._awaiting_report = {"1"}
+    subject._awaiting_since = time()
+    subject._report_received.clear()
+
+    loop = subject.async_receive()
+    await asyncio.sleep(subject._HEARTBEAT_INTERVAL + 0.1)
+    result = await loop.__anext__()
+
+    mock_api().heartbeat.assert_not_called()
+    mock_api().status.assert_not_called()
+    mock_api().receive.assert_called()
+    assert result == {"1": "UPDATED", "full_poll": False}
+    subject._running = False
+    await loop.aclose()
+
+
+def test_awaiting_report_expires_by_itself(subject):
+    """An unreported command must not block heartbeats and polls forever."""
+    subject._COMMAND_SETTLE_TIMEOUT = 2
+    subject._awaiting_report = {"1"}
+    subject._report_received.clear()
+
+    subject._awaiting_since = time()
+    assert subject._is_awaiting_report()
+
+    subject._awaiting_since = time() - 3
+    assert not subject._is_awaiting_report()
+    assert subject._report_received.is_set()
+    assert subject._awaiting_report == set()
