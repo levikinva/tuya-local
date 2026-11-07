@@ -57,8 +57,7 @@ entities:
         type: integer
         unit: "°C"
   - entity: sensor
-    name: "Filter life"
-    icon: "mdi:air-filter"
+    translation_key: filter_life
     dps:
       - id: 115
         name: sensor
@@ -143,9 +142,8 @@ entities:
           - dps_val: "100"
             value: 255
   - entity: switch
-    name: "Sound"
+    translation_key: sound
     category: config
-    icon: "mdi:volume-high"
     dps:
       - id: 103
         name: switch
